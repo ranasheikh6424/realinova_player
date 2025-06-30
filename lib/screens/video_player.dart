@@ -18,10 +18,10 @@ class _VideoListPageState extends State<VideoListPage> {
   @override
   void initState() {
     super.initState();
-    requestPermission();
+    _requestPermission();
   }
 
-  Future<void> requestPermission() async {
+  Future<void> _requestPermission() async {
     final result = await PhotoManager.requestPermissionExtend();
     if (result.isAuth) {
       fetchVideos();

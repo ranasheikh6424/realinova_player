@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:loading_animation_widget/loading_animation_widget.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class AudioPage extends StatefulWidget {
   const AudioPage({super.key});
@@ -15,11 +19,13 @@ class _AudioPageState extends State<AudioPage> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   AssetEntity? _currentlyPlaying;
   bool _isPlaying = false;
+  bool _loading = true;
+  bool _permissionDenied = false;
 
   @override
   void initState() {
     super.initState();
-    requestPermission();
+    _requestPermissionAudio();
     _audioPlayer.playerStateStream.listen((state) {
       setState(() {
         _isPlaying = state.playing;
@@ -33,12 +39,38 @@ class _AudioPageState extends State<AudioPage> {
     super.dispose();
   }
 
-  Future<void> requestPermission() async {
-    final result = await PhotoManager.requestPermissionExtend();
-    if (result.isAuth) {
-      fetchAudio();
+  Future<void> _requestPermissionAudio() async {
+    // First, check and request READ_MEDIA_AUDIO or fallback to storage for older APIs
+    PermissionStatus status;
+
+    if (await Permission.audio.isGranted) {
+      status = PermissionStatus.granted;
     } else {
-      PhotoManager.openSetting();
+      status = await Permission.audio.request();
+    }
+
+    if (status.isGranted) {
+      // Also request photo_manager permission for safety
+      final photoPerm = await PhotoManager.requestPermissionExtend();
+      if (photoPerm.isAuth) {
+        await fetchAudio();
+        setState(() {
+          _permissionDenied = false;
+          _loading = false;
+        });
+      } else {
+        // permission denied by photo_manager, open settings
+        setState(() {
+          _permissionDenied = true;
+          _loading = false;
+        });
+      }
+    } else {
+      // permission denied by permission_handler
+      setState(() {
+        _permissionDenied = true;
+        _loading = false;
+      });
     }
   }
 
@@ -47,13 +79,15 @@ class _AudioPageState extends State<AudioPage> {
       type: RequestType.audio,
       onlyAll: false,
     );
-
+    print('Found audio albums: ${audioAlbums.length}');
     List<AssetEntity> allAudio = [];
     for (final album in audioAlbums) {
       final count = await album.assetCountAsync;
+      print('Album: ${album.name}, assets count: $count');
       final assets = await album.getAssetListRange(start: 0, end: count);
       allAudio.addAll(assets);
     }
+    print('Total audio files found: ${allAudio.length}');
 
     setState(() {
       audioFiles = allAudio;
@@ -61,25 +95,24 @@ class _AudioPageState extends State<AudioPage> {
   }
 
   Future<void> playAudio(AssetEntity asset) async {
-    final file = await asset.file;
-    if (file != null) {
-      if (_currentlyPlaying == asset) {
-        if (_isPlaying) {
-          await _audioPlayer.pause();
-        } else {
-          _audioPlayer.play();
-        }
-      } else {
-        await _audioPlayer.setFilePath(file.path);
-        _audioPlayer.play();
-        setState(() {
-          _currentlyPlaying = asset;
-        });
-      }
-    } else {
-      print('Unable to load audio file.');
+    File? file = await asset.file;
+    file ??= await asset.originFile;
+
+    if (file == null || !await file.exists()) {
+      debugPrint('No local file found.');
+      return;
     }
+
+    debugPrint('Release file path: ${file.path}');
+
+    await _audioPlayer.setFilePath(file.path);
+    _audioPlayer.play();
+
+    setState(() {
+      _currentlyPlaying = asset;
+    });
   }
+
 
   Future<void> stopAudio() async {
     await _audioPlayer.stop();
@@ -90,12 +123,51 @@ class _AudioPageState extends State<AudioPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (_loading) {
+      return Scaffold(
+        backgroundColor: Colors.purple.shade50,
+        body: Center(
+          child: LoadingAnimationWidget.fourRotatingDots(
+            color: Colors.purple,
+            size: 34,
+          ),
+        ),
+      );
+    }
+
+    if (_permissionDenied) {
+      return Scaffold(
+        backgroundColor: Colors.purple.shade50,
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Permission denied.\nPlease allow audio access in settings.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 18),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  PhotoManager.openSetting();
+                },
+                child: const Text('Open Settings'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.purple.shade50,
       body: Stack(
         children: [
           audioFiles.isEmpty
-              ? Center(child: LoadingAnimationWidget.fourRotatingDots(color: Colors.purple, size:34))
+              ? const Center(
+            child: Text('No audio files found.'),
+          )
               : ListView.builder(
             padding: const EdgeInsets.all(8),
             itemCount: audioFiles.length,
@@ -104,17 +176,11 @@ class _AudioPageState extends State<AudioPage> {
               final isPlayingThis = asset == _currentlyPlaying && _isPlaying;
 
               return Card(
-                // shape: RoundedRectangleBorder(
-                //   borderRadius: BorderRadius.circular(12),
-                // ),
                 margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
                 color: asset == _currentlyPlaying
                     ? Colors.deepPurple[50]
                     : Colors.white,
                 child: ListTile(
-                  // shape: RoundedRectangleBorder(
-                  //   borderRadius: BorderRadius.circular(12),
-                  // ),
                   leading: Icon(
                     isPlayingThis ? Icons.pause_circle_filled : Icons.play_circle_fill,
                     color: isPlayingThis ? Colors.deepPurple : Colors.grey[700],
@@ -122,9 +188,7 @@ class _AudioPageState extends State<AudioPage> {
                   ),
                   title: Text(
                     asset.title ?? 'Unknown',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                    ),
+                    style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                   subtitle: Text(
                     '${asset.createDateTime.toLocal()}'.split(' ')[0],
